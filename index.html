@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cre8Learn Institute | C6-LIE-19 Section B Techniques Reference</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f4f1e8;color:#1a1a1a;font:16px/1.65 Georgia,"Times New Roman",serif}
+.wrap{max-width:900px;margin:0 auto;background:#fffdf8;border-top:8px solid #2d7a3d;padding:34px 40px 50px}
+header{text-align:center;border-bottom:2px solid #1a1a1a;padding-bottom:18px;margin-bottom:24px}
+.brand{font:700 13px "Courier New",monospace;letter-spacing:4px;color:#2d7a3d}
+h1{font-size:27px;line-height:1.25;margin:8px 0 4px}
+.sub{color:#444;font-style:italic;margin:0}
+.by{margin:14px 0 0;font-size:14.5px}
+h2{font-size:20px;margin:38px 0 6px;padding:6px 12px;background:#2d7a3d;color:#fff;border-radius:3px}
+h3{font-size:17px;margin:26px 0 4px;color:#1f5a2c;border-bottom:1px solid #d9d3c0;padding-bottom:3px}
+p,li{max-width:72ch}
+.box{background:#fff;border:1px solid #ddd;border-left:4px solid #d4b85a;padding:12px 18px;margin:14px 0}
+.stop{border-left-color:#b3261e;background:#fff5f4}
+pre{background:#161d18;color:#d6efdf;padding:12px 16px;border-radius:4px;overflow-x:auto;font:13px/1.55 "Courier New",Courier,monospace;margin:8px 0 12px;white-space:pre}
+code{font:13px "Courier New",monospace;background:#eee9d9;padding:1px 5px;border-radius:3px}
+.tw{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14.5px;min-width:560px;margin:8px 0 14px}
+th,td{border:1px solid #cfc9b5;padding:7px 10px;text-align:left;vertical-align:top}
+th{background:#ece7d4}
+.m{display:inline-block;background:#1a1a1a;color:#d4b85a;border-radius:10px;padding:0 10px;font:13px "Courier New",monospace;margin-left:8px;vertical-align:middle}
+footer{margin-top:44px;padding-top:16px;border-top:2px solid #1a1a1a;text-align:center;font:12px "Courier New",monospace;color:#555}
+@media(max-width:700px){.wrap{padding:22px 16px 40px}h1{font-size:22px}}
+@media print{body{background:#fff}.wrap{border:0;padding:0}pre{white-space:pre-wrap}h2{background:none;color:#000;border-bottom:2px solid #000}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<div class="brand">CRE8LEARN INSTITUTE</div>
+<h1>C6-LIE-19 Linux Essentials<br>Section B Techniques Reference</h1>
+<p class="sub">The NALEDI system in shell scripting (40 marks)</p>
+<p class="by"><b>Instructor:</b> Teboho Mpholo (Mr.), Founder and Lead Instructor<br>CP2 is Monday 26 October: B1 to B4 working</p>
+</header>
+
+<div class="box stop"><b>How to use this page.</b> Every example here uses a made-up library system (loans.dat, books, members), not NALEDI. Learn the technique, then build your own NALEDI modules with your own structure, names and wording. Section B is marked by running your system, and near-identical scripts between students are referred for collusion. The examples were tested with GNU bash, awk and date.</div>
+
+<h3>Module map and the four whole-section rules</h3>
+<pre>bin/naledi                 entry point: loads config, parses getopts, shows the menu
+lib/config.sh              naledi_load_config (from A3)
+lib/audit.sh               audit, with_lock, cleanup
+lib/validate.sh            valid_date, in_set, valid_nid, ...
+lib/registry.sh            register, search, transfer
+lib/permits.sh             issue, close, sweep
+lib/compliance.sh          monthly run, defaulters
+lib/report.sh              district report, CSV export</pre>
+<div class="tw"><table>
+<tr><th>Rule in the paper</th><th>What it means in code</th></tr>
+<tr><td>Modularity</td><td>One entry point, functions grouped by concern. A single monolithic script is capped at 60% of Section B.</td></tr>
+<tr><td>Safety</td><td><code>set -euo pipefail</code>, every expansion quoted, <code>mktemp</code> plus a trap, every data write under <code>flock</code>.</td></tr>
+<tr><td>Auditability</td><td>Every state-changing action appends one line to logs/audit.log: ISO time, OS user, action, target key, outcome.</td></tr>
+<tr><td>Idempotency</td><td>Re-running a processed period is detected and refused with a clear message.</td></tr>
+</table></div>
+
+<h2>1. Safety header, lock, temp files and audit <span class="m">all of B</span></h2>
+<pre>#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &amp;&amp; pwd)"
+TMP="$(mktemp -d)"
+cleanup() { rm -rf "$TMP"; }
+trap cleanup EXIT                                   # runs on every exit path
+trap 'echo "interrupted" &gt;&amp;2; exit 130' INT TERM    # exit triggers the EXIT trap
+
+with_lock() { ( flock -x 9; "$@" ) 9&gt;"$ROOT/data/.lock"; }   # serialise data writes
+
+audit() {   # audit ACTION TARGET OUTCOME [DETAIL]
+  printf '%s|%s|%s|%s|%s|%s\n' "$(date -Is)" "$(id -un)" "$1" "$2" "$3" "${4:-}" &gt;&gt; "$ROOT/logs/audit.log"
+}</pre>
+<ul><li>The lock is released automatically when the subshell ends, even if the process is killed, because the kernel drops it with the file descriptor.</li>
+<li><code>date -Is</code> gives ISO-8601 with the time zone.</li>
+<li>Call it as <code>with_lock register_animal "$tag"</code>. Keep the audit call inside the locked function so the log and the data always agree.</li></ul>
+
+<h2>2. Validation recipes <span class="m">B2, B4</span></h2>
+<h3>A real calendar date, not in the future</h3>
+<pre>valid_date() {   # dd-mm-yyyy
+  local s=$1 iso
+  [[ $s =~ ^([0-9]{2})-([0-9]{2})-([0-9]{4})$ ]] || return 1
+  iso="${BASH_REMATCH[3]}-${BASH_REMATCH[2]}-${BASH_REMATCH[1]}"
+  [ "$(date -d "$iso" +%F 2&gt;/dev/null)" = "$iso" ] || return 1   # round trip rejects 31-02
+  [[ "$iso" &gt; "$(date +%F)" ]] &amp;&amp; return 1                      # not in the future
+  return 0
+}</pre>
+<p>Tested: <code>31-02-2025</code> and <code>29-02-2027</code> are rejected, <code>29-02-2024</code> is accepted, <code>1-1-2020</code> is rejected by the format check. The round trip works because <code>date</code> either refuses an impossible date or rolls it over, and either way the output no longer equals the input. For B4, also compare against the date of birth: two ISO strings compare correctly with <code>[[ "$a" &lt; "$b" ]]</code>.</p>
+<h3>Closed sets and patterns</h3>
+<pre>in_set() { local x=$1; shift; local i; for i in "$@"; do [ "$i" = "$x" ] &amp;&amp; return 0; done; return 1; }
+in_set "$sex" M F || echo "Sex must be M or F" &gt;&amp;2
+[[ $surname =~ ^[A-Za-z][A-Za-z' -]*$ ]] || echo "Surname has invalid characters" &gt;&amp;2
+cut -d'|' -f1 "$ROOT/data/districts.dat" | grep -qx "$district" || echo "Unknown district" &gt;&amp;2</pre>
+<p>Decide the national identity number format yourself and state it in the report. Validation never writes anything: finish every check first, then write once.</p>
+
+<h2>3. Sequential IDs that are never reused <span class="m">B2</span></h2>
+<pre>next_seq() {   # call inside with_lock
+  local f="$ROOT/data/.tag_seq" n
+  n=$(( $(cat "$f" 2&gt;/dev/null || echo 0) + 1 ))
+  echo "$n" &gt; "$f"
+  printf '%s%05d\n' "$TAG_PREFIX" "$n"
+}</pre>
+<p>Do not use "highest tag in the file plus one". When an animal moves to the Mortality Register, that method hands its tag out again. A counter that only goes up never does.</p>
+
+<h3>Defining a duplicate</h3>
+<pre>is_duplicate() {   # key built from the fields YOU decide identify "the same item"
+  local key=$1 file=$2
+  awk -F'|' -v k="$key" '($2 "|" $5 "|" $6 "|" $7)==k {f=1} END{exit !f}' "$file"
+}</pre>
+<p>The paper gives you the fields (owner NID, DOB, sex, breed, within the same village). Your report must say how you defined it and why, so explain what you chose not to match on, such as the tag, which is always new.</p>
+
+<h2>4. Search and age arithmetic <span class="m">B3, B5</span></h2>
+<pre># exact match on field 1
+awk -F'|' -v k="$tag" '$1==k' "$file"
+
+# partial, case-insensitive on field 2, aligned table, with a count and a not-found message
+awk -F'|' -v q="$term" '
+  BEGIN { printf "%-10s %-14s %s\n", "TAG", "SURNAME", "VILLAGE" }
+  index(tolower($2), tolower(q)) { printf "%-10s %-14s %s\n", $1, $2, $3; n++ }
+  END   { if (n) printf "%d record(s) found\n", n; else print "Nothing found" }' "$file"</pre>
+<p>Tested: searching <code>mok</code> returns both Mokoena and MOKGOSI. Use <code>index()</code> rather than a regex so a user typing a dot or bracket cannot break the search.</p>
+<h3>Age in whole months at a date you supply</h3>
+<pre>age_months() {   # age_months BIRTH ASOF, both YYYY-MM-DD
+  local by bm bd ay am ad
+  IFS=- read -r by bm bd &lt;&lt;&lt;"$1"; IFS=- read -r ay am ad &lt;&lt;&lt;"$2"
+  echo $(( (10#$ay-10#$by)*12 + 10#$am-10#$bm - (10#$ad &lt; 10#$bd ? 1 : 0) ))
+}
+age_months 2024-08-25 2026-02-25    # 18
+age_months 2024-08-26 2026-02-25    # 17</pre>
+<p>The <code>10#</code> prefix stops bash reading 08 and 09 as bad octal numbers. Age is calculated from the date of birth each time and is never stored.</p>
+
+<h2>5. Atomic transfer between two files <span class="m">B4</span></h2>
+<pre>move_record() {   # run under with_lock. Moves one line from SRC to DST
+  local key=$1 src=$2 dst=$3 ns nd
+  grep -q "^$key|" "$src" || { echo "Not found: $key" &gt;&amp;2; return 1; }
+  ns=$(mktemp "$src.XXXXXX"); nd=$(mktemp "$dst.XXXXXX")        # same directory, so mv is a rename
+  awk -F'|' -v k="$key" '$1!=k' "$src" &gt; "$ns"                  # source without the record
+  { cat "$dst"; grep "^$key|" "$src"; } &gt; "$nd"                 # destination plus the record
+  [ -z "${NALEDI_FAIL_TEST:-}" ] || { rm -f "$ns" "$nd"; echo "forced failure" &gt;&amp;2; return 1; }
+  chmod --reference="$src" "$ns"; chmod --reference="$dst" "$nd" # mktemp makes files mode 600
+  mv "$nd" "$dst" &amp;&amp; mv "$ns" "$src"                           # destination first
+}</pre>
+<ul>
+<li>Both new versions are built completely before any live file changes, so a failure at any point before the renames leaves both files exactly as they were.</li>
+<li>Renaming the destination first means a crash between the two renames can only create a duplicate, never lose a record. Add a startup check that reports a tag present in both files.</li>
+<li><b>Demonstrate it for the report:</b> run once with <code>NALEDI_FAIL_TEST=1</code>, then show <code>wc -l</code> and <code>sha256sum</code> of both files before and after. They must match.</li>
+<li>Reject a second death record by checking the mortality file first, and reject a permit for any tag found there.</li></ul>
+
+<h2>6. Non-interactive mode and the menu <span class="m">B1</span></h2>
+<pre># Translate long options, then use getopts. The clerk menu and the scheduler call the SAME functions.
+args=(); for a in "$@"; do
+  case $a in --run-compliance) args+=(-r);; --sweep-permits) args+=(-s);; *) args+=("$a");; esac
+done
+set -- ${args[@]+"${args[@]}"}
+while getopts ":sr:h" o; do case $o in
+  s) with_lock sweep_permits; exit $? ;;
+  r) with_lock run_compliance "$OPTARG"; exit $? ;;
+  h) echo "usage: naledi [--sweep-permits] [--run-compliance YYYY-MM]"; exit 0 ;;
+  :) echo "Option -$OPTARG needs a value" &gt;&amp;2; exit 2 ;;
+  *) echo "Unknown option" &gt;&amp;2; exit 2 ;;
+esac; done
+
+while true; do
+  clear; show_counts                                   # live counts on every redraw
+  read -rp "Choice: " c || break                       # end of input must leave the loop
+  case $c in
+    1) if ! register_animal; then echo "Not saved. See message above."; fi ;;
+    q|Q) break ;;
+    *) echo "Invalid choice" ;;
+  esac
+  read -rp "Press Enter" _ || break
+done</pre>
+<p><b>Trap:</b> under <code>set -e</code> a failing function would drop the clerk out of the menu. Calling it inside <code>if ! fn; then</code> prevents that. A count such as active animals is one line of awk: <code>awk -F'|' '$10=="ACTIVE"{n++} END{print n+0}' file</code> (check the field number in Appendix A).</p>
+
+<h2>7. Permits and the expiry sweep <span class="m">B6</span></h2>
+<pre>sweep_loans() {   # dd-mm-yyyy due date in field 4, status in field 5
+  local today out; today=$(date +%F); out=$(mktemp "$ROOT/data/loans.dat.XXXXXX")
+  awk -F'|' -v OFS='|' -v t="$today" '
+    { split($4, d, "-"); iso = d[3] "-" d[2] "-" d[1] }
+    $5=="OPEN" &amp;&amp; iso &lt; t { $5="EXPIRED"; print $1, $2 &gt; "/dev/stderr" }
+    { print }' "$ROOT/data/loans.dat" &gt; "$out"
+  chmod --reference="$ROOT/data/loans.dat" "$out"; mv "$out" "$ROOT/data/loans.dat"
+}</pre>
+<p>Only OPEN rows are changed, so a second sweep on the same day finds nothing and changes nothing. Compare file hashes before and after the second run to prove it. For the expiry date, add the validity from config with <code>date -d "$iso + $PERMIT_DAYS days" +%F</code>, then write it back as dd-mm-yyyy with <code>date -d "$iso" +%d-%m-%Y</code>. Each refusal must say its own reason: not ACTIVE, already holds an OPEN permit, or which district is under QUARANTINE.</p>
+
+<h2>8. The monthly run <span class="m">B7</span></h2>
+<pre>run_compliance() {   # run_compliance 2026-11
+  local ym=$1 f="$ROOT/data/inspection_${1/-/}.dat" run_date="$1-25"
+  [[ $ym =~ ^[0-9]{4}-(0[1-9]|1[0-2])$ ]] || { echo "Month must be YYYY-MM" &gt;&amp;2; return 2; }
+  if [ -e "$f" ]; then echo "Month $ym was already processed. An officer must re-open it." &gt;&amp;2; return 3; fi
+  # ... qualify animals using age_months "$dob_iso" "$run_date" -ge "$INSPECT_AGE_MONTHS" ...
+}
+
+months_in_default() {   # consecutive months, a first offence is 1
+  local tag=$1 ym=$2 n=1 prev
+  prev=$(date -d "$ym-01 -1 month" +%Y%m)
+  while [ -f "$ROOT/data/defaulters_$prev.dat" ] &amp;&amp; grep -q "^$tag|" "$ROOT/data/defaulters_$prev.dat"; do
+    n=$((n+1)); prev=$(date -d "${prev:0:4}-${prev:4:2}-01 -1 month" +%Y%m)
+  done
+  echo "$n"
+}
+penalty=$(( PENALTY_BWP * $(months_in_default "$tag" "$ym") ))
+
+reopen_month() {   # deliberate, confirmed and logged
+  read -rp "Type REOPEN $1 to confirm: " c
+  [ "$c" = "REOPEN $1" ] || { echo "Cancelled"; return 1; }
+  audit REOPEN "$1" OK; mv "$ROOT/data/inspection_${1/-/}.dat" "$ROOT/data/inspection_${1/-/}.dat.reopened"
+}</pre>
+<p>Quarantine on the 25th means checking <code>EffectiveFrom</code> and <code>EffectiveTo</code> against that date, not against today. Prevent a double inspection by checking the Inspected flag before you set it.</p>
+
+<h2>9. Report once, show it twice <span class="m">B8</span></h2>
+<pre>build_report_data() {   # one pass, writes district|qualifying|inspected|defaulted|pct|penalty
+  awk -F'|' -v OFS='|' '
+    { q[$3]++; if ($6=="Y") i[$3]++ }
+    END { for (d in q) { df=q[d]-i[d]; printf "%s|%d|%d|%d|%.1f\n", d, q[d], i[d]+0, df, 100*(i[d]+0)/q[d] } }
+  ' "$1" | sort &gt; "$TMP/report.psv"
+}
+# table view and CSV both read $TMP/report.psv, so nothing is computed a second time
+column -t -s'|' "$TMP/report.psv"
+{ echo "District,Qualifying,Inspected,Defaulted,Compliance,Penalty"; tr '|' ',' &lt; "$TMP/report.psv"; } &gt; "$out.csv"</pre>
+<p>The tested output looks like <code>D1|2|1|50.0</code>. Add the penalty total from the defaulters file and a totals row in awk. Round with <code>%.1f</code>, and guard against a district with zero qualifying animals before you divide.</p>
+
+<h2>What the marker will test</h2>
+<div class="tw"><table>
+<tr><th>Item</th><th>Likely checks</th></tr>
+<tr><td>B1 [7]</td><td>Menu never crashes on junk input or Ctrl+C. Counts refresh. <code>--sweep-permits</code> and <code>--run-compliance 2026-11</code> work from the same code. No temp files left behind.</td></tr>
+<tr><td>B2 [5]</td><td>31-02-2025 and 29-02-2027 rejected, 29-02-2024 accepted, future dates rejected. Tags sequential, never reused after a transfer. Duplicate refused with a reason.</td></tr>
+<tr><td>B3 [6]</td><td>All five searches. <code>mok</code> finds Mokoena and MOKGOSI. Empty result says so. Age range as at a supplied date. Table with a count.</td></tr>
+<tr><td>B4 [5]</td><td>Only a tag is typed. Details fetched, not retyped. Forced failure loses and duplicates nothing. Second death and a permit for a dead animal are refused.</td></tr>
+<tr><td>B5 [3]</td><td>Retrieve by tag, by cause, by date range, with counts per cause for the range.</td></tr>
+<tr><td>B6 [5]</td><td>Three refusals with specific reasons. Closing a permit updates the herd district. Two sweeps on one day give identical files.</td></tr>
+<tr><td>B7 [6]</td><td>Right animals qualify on the 25th. Handler NID captured. No double inspection. Penalty is unit times consecutive months. Re-run refused, re-open confirmed and logged.</td></tr>
+<tr><td>B8 [3]</td><td>awk report with totals row and one decimal. CSV exported without recomputing.</td></tr>
+</table></div>
+
+<p><b>Write your own report notes as you build:</b> your duplicate definition and why, the failure demonstration for B4, the locking and idempotency strategy, and every decision where you changed Appendix A (documented and justified, or markers test against it).</p>
+
+<footer>CRE8LEARN INSTITUTE | C6-LIE-19 Linux Essentials | Section B Techniques Reference<br>Teboho Mpholo (Mr.), Founder and Lead Instructor</footer>
+</div>
+</body>
+</html>
